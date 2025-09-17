@@ -1,6 +1,7 @@
 import 'dart:io';
 
 import 'package:flutter/material.dart';
+import 'package:flutter_local_notifications/flutter_local_notifications.dart';
 import 'package:just_audio/just_audio.dart';
 import 'package:path_provider/path_provider.dart';
 import 'package:permission_handler/permission_handler.dart';
@@ -36,15 +37,18 @@ class RecorderPage extends StatefulWidget {
 class _RecorderPageState extends State<RecorderPage> {
   final AudioRecorder _recorder = AudioRecorder();
   final AudioPlayer _player = AudioPlayer();
+  final FlutterLocalNotificationsPlugin _localNotifications = FlutterLocalNotificationsPlugin();
 
   bool _isRecording = false;
   bool _isPaused = false;
   String? _recordingPath;
+  static const int _recordingNotificationId = 1001;
 
   @override
   void initState() {
     super.initState();
     _ensurePermissions();
+    _initNotifications();
   }
 
   Future<void> _ensurePermissions() async {
@@ -58,6 +62,48 @@ class _RecorderPageState extends State<RecorderPage> {
         await Permission.notification.request();
       }
     }
+  }
+
+  Future<void> _initNotifications() async {
+    const DarwinInitializationSettings iosInit = DarwinInitializationSettings(
+      requestAlertPermission: true,
+      requestBadgePermission: false,
+      requestSoundPermission: false,
+      defaultPresentAlert: true,
+      defaultPresentBadge: false,
+      defaultPresentSound: false,
+    );
+    const InitializationSettings initSettings = InitializationSettings(iOS: iosInit);
+    await _localNotifications.initialize(
+      initSettings,
+      onDidReceiveNotificationResponse: (NotificationResponse response) async {
+        // Tapping the notification brings the app to foreground automatically.
+        // No-op here, but could navigate if needed.
+      },
+    );
+    // Explicitly request iOS permissions via the plugin implementation
+    final IOSFlutterLocalNotificationsPlugin? iosPlugin =
+        _localNotifications.resolvePlatformSpecificImplementation<IOSFlutterLocalNotificationsPlugin>();
+    await iosPlugin?.requestPermissions(alert: true, badge: false, sound: false);
+  }
+
+  Future<void> _showRecordingNotification({required bool paused}) async {
+    const DarwinNotificationDetails iosDetails = DarwinNotificationDetails(
+      presentAlert: true,
+      presentBadge: false,
+      presentSound: false,
+      threadIdentifier: 'recording',
+    );
+    await _localNotifications.show(
+      _recordingNotificationId,
+      paused ? 'Recording paused' : 'Recording in progress',
+      'Tap to return to the app',
+      const NotificationDetails(iOS: iosDetails),
+    );
+  }
+
+  Future<void> _cancelRecordingNotification() async {
+    await _localNotifications.cancel(_recordingNotificationId);
   }
 
   Future<String> _resolveRecordingFilePath() async {
@@ -80,6 +126,7 @@ class _RecorderPageState extends State<RecorderPage> {
       setState(() {
         _isPaused = false;
       });
+      await _showRecordingNotification(paused: false);
       return;
     }
 
@@ -100,6 +147,7 @@ class _RecorderPageState extends State<RecorderPage> {
       _isRecording = true;
       _isPaused = false;
     });
+    await _showRecordingNotification(paused: false);
   }
 
   Future<void> _pause() async {
@@ -110,6 +158,7 @@ class _RecorderPageState extends State<RecorderPage> {
         setState(() {
           _isPaused = true;
         });
+        await _showRecordingNotification(paused: true);
       }
     }
   }
@@ -121,6 +170,7 @@ class _RecorderPageState extends State<RecorderPage> {
         _isRecording = false;
         _isPaused = false;
       });
+      await _cancelRecordingNotification();
     }
   }
 
