@@ -1,4 +1,5 @@
 import 'dart:io';
+import 'dart:async';
 
 import 'package:flutter/material.dart';
 import 'package:flutter_local_notifications/flutter_local_notifications.dart';
@@ -127,6 +128,7 @@ class _RecorderPageState extends State<RecorderPage> {
         _isPaused = false;
       });
       await _showRecordingNotification(paused: false);
+      _startStreamingMock();
       return;
     }
 
@@ -148,6 +150,7 @@ class _RecorderPageState extends State<RecorderPage> {
       _isPaused = false;
     });
     await _showRecordingNotification(paused: false);
+    _startStreamingMock();
   }
 
   Future<void> _pause() async {
@@ -159,6 +162,7 @@ class _RecorderPageState extends State<RecorderPage> {
           _isPaused = true;
         });
         await _showRecordingNotification(paused: true);
+        _pauseStreamingMock();
       }
     }
   }
@@ -171,7 +175,32 @@ class _RecorderPageState extends State<RecorderPage> {
         _isPaused = false;
       });
       await _cancelRecordingNotification();
+      _stopStreamingMock();
     }
+  }
+
+  Timer? _streamTimer;
+  int _sentChunks = 0;
+
+  void _startStreamingMock() {
+    _streamTimer?.cancel();
+    _streamTimer = Timer.periodic(const Duration(milliseconds: 800), (_) {
+      _sentChunks += 1;
+      debugPrint('Mock sent chunk #$_sentChunks');
+      if (mounted) {
+        setState(() {});
+      }
+    });
+  }
+
+  void _pauseStreamingMock() {
+    _streamTimer?.cancel();
+    _streamTimer = null;
+  }
+
+  void _stopStreamingMock() {
+    _streamTimer?.cancel();
+    _streamTimer = null;
   }
 
   Future<void> _play() async {
@@ -236,6 +265,8 @@ class _RecorderPageState extends State<RecorderPage> {
               ],
             ),
             const SizedBox(height: 24),
+            Text('Sent chunks: $_sentChunks'),
+            const SizedBox(height: 12),
             if (_recordingPath != null)
               Text(
                 'Saved to:\n$_recordingPath',
