@@ -3,6 +3,7 @@ import 'dart:async';
 
 import 'package:flutter/material.dart';
 import 'package:flutter_local_notifications/flutter_local_notifications.dart';
+import 'package:audio_session/audio_session.dart';
 import 'package:just_audio/just_audio.dart';
 import 'package:path_provider/path_provider.dart';
 import 'package:permission_handler/permission_handler.dart';
@@ -44,12 +45,16 @@ class _RecorderPageState extends State<RecorderPage> {
   bool _isPaused = false;
   String? _recordingPath;
   static const int _recordingNotificationId = 1001;
+  static const String _androidChannelId = 'recording_status';
+  static const String _androidChannelName = 'Recording status';
+  static const String _androidChannelDescription = 'Shows recording status while recording';
 
   @override
   void initState() {
     super.initState();
     _ensurePermissions();
     _initNotifications();
+    _configureAudioSession();
   }
 
   Future<void> _ensurePermissions() async {
@@ -65,6 +70,50 @@ class _RecorderPageState extends State<RecorderPage> {
     }
   }
 
+  Future<void> _configureAudioSession() async {
+    final AudioSession session = await AudioSession.instance;
+    await session.configure(
+      const AudioSessionConfiguration(
+        avAudioSessionCategory: AVAudioSessionCategory.playAndRecord,
+        avAudioSessionMode: AVAudioSessionMode.spokenAudio,
+        androidAudioAttributes: AndroidAudioAttributes(
+          contentType: AndroidAudioContentType.speech,
+          usage: AndroidAudioUsage.voiceCommunication,
+        ),
+        androidAudioFocusGainType: AndroidAudioFocusGainType.gain,
+        androidWillPauseWhenDucked: false,
+      ),
+    );
+
+    session.interruptionEventStream.listen((event) async {
+      if (event.begin) {
+        if (_isRecording && !_isPaused) {
+          await _recorder.pause();
+          if (mounted) {
+            setState(() {
+              _isPaused = true;
+            });
+          }
+          await _showRecordingNotification(paused: true);
+          _pauseStreamingMock();
+        }
+      }
+    });
+
+    session.becomingNoisyEventStream.listen((_) async {
+      if (_isRecording && !_isPaused) {
+        await _recorder.pause();
+        if (mounted) {
+          setState(() {
+            _isPaused = true;
+          });
+        }
+        _pauseStreamingMock();
+        await _showRecordingNotification(paused: true);
+      }
+    });
+  }
+
   Future<void> _initNotifications() async {
     const DarwinInitializationSettings iosInit = DarwinInitializationSettings(
       requestAlertPermission: true,
@@ -74,7 +123,11 @@ class _RecorderPageState extends State<RecorderPage> {
       defaultPresentBadge: false,
       defaultPresentSound: false,
     );
-    const InitializationSettings initSettings = InitializationSettings(iOS: iosInit);
+    const AndroidInitializationSettings androidInit = AndroidInitializationSettings('ic_stat_mic');
+    const InitializationSettings initSettings = InitializationSettings(
+      android: androidInit,
+      iOS: iosInit,
+    );
     await _localNotifications.initialize(
       initSettings,
       onDidReceiveNotificationResponse: (NotificationResponse response) async {
@@ -82,6 +135,19 @@ class _RecorderPageState extends State<RecorderPage> {
         // No-op here, but could navigate if needed.
       },
     );
+    if (Platform.isAndroid) {
+      const AndroidNotificationChannel channel = AndroidNotificationChannel(
+        _androidChannelId,
+        _androidChannelName,
+        description: _androidChannelDescription,
+        importance: Importance.low,
+        playSound: false,
+        showBadge: false,
+      );
+      final AndroidFlutterLocalNotificationsPlugin? androidPlugin =
+          _localNotifications.resolvePlatformSpecificImplementation<AndroidFlutterLocalNotificationsPlugin>();
+      await androidPlugin?.createNotificationChannel(channel);
+    }
     // Explicitly request iOS permissions via the plugin implementation
     final IOSFlutterLocalNotificationsPlugin? iosPlugin =
         _localNotifications.resolvePlatformSpecificImplementation<IOSFlutterLocalNotificationsPlugin>();
@@ -95,11 +161,25 @@ class _RecorderPageState extends State<RecorderPage> {
       presentSound: false,
       threadIdentifier: 'recording',
     );
+    final NotificationDetails details = NotificationDetails(
+      android: AndroidNotificationDetails(
+        _androidChannelId,
+        _androidChannelName,
+        channelDescription: _androidChannelDescription,
+        importance: Importance.low,
+        priority: Priority.low,
+        ongoing: true,
+        onlyAlertOnce: true,
+        autoCancel: false,
+        icon: 'ic_stat_mic',
+      ),
+      iOS: iosDetails,
+    );
     await _localNotifications.show(
       _recordingNotificationId,
       paused ? 'Recording paused' : 'Recording in progress',
       'Tap to return to the app',
-      const NotificationDetails(iOS: iosDetails),
+      details,
     );
   }
 
