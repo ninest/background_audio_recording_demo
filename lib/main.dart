@@ -48,6 +48,8 @@ class _RecorderPageState extends State<RecorderPage> with WidgetsBindingObserver
   String? _recordingPath;
   static const int _recordingNotificationId = 1001;
   bool _useBackgroundService = false;
+  // Chunk duration for Android background service (in milliseconds)
+  static const int _chunkDurationMs = 10000; // 10 seconds
 
   @override
   void initState() {
@@ -252,7 +254,10 @@ class _RecorderPageState extends State<RecorderPage> with WidgetsBindingObserver
     if (_useBackgroundService) {
       // Use background service for Android - service handles MediaRecorder directly
       debugPrint('Starting background service recording to: $path');
-      final success = await _backgroundService.startRecording(path);
+      final success = await _backgroundService.startRecording(
+        path,
+        chunkDurationMs: _chunkDurationMs,
+      );
       if (success) {
         recordingStarted = true;
         debugPrint('Background service recording started successfully');

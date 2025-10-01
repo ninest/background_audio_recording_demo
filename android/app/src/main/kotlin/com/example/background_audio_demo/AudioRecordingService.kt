@@ -19,11 +19,16 @@ class AudioRecordingService : Service() {
         private const val ACTION_STOP_RECORDING = "STOP_RECORDING"
         private const val ACTION_PAUSE_RECORDING = "PAUSE_RECORDING"
         private const val ACTION_RESUME_RECORDING = "RESUME_RECORDING"
+        private const val EXTRA_OUTPUT_PATH = "output_path"
+        private const val EXTRA_CHUNK_DURATION_MS = "chunk_duration_ms"
         
-        fun startRecording(context: Context, outputPath: String) {
+        fun startRecording(context: Context, outputPath: String, chunkDurationMs: Long? = null) {
             val intent = Intent(context, AudioRecordingService::class.java).apply {
                 action = ACTION_START_RECORDING
-                putExtra("output_path", outputPath)
+                putExtra(EXTRA_OUTPUT_PATH, outputPath)
+                if (chunkDurationMs != null && chunkDurationMs > 0L) {
+                    putExtra(EXTRA_CHUNK_DURATION_MS, chunkDurationMs)
+                }
             }
             context.startForegroundService(intent)
         }
@@ -54,10 +59,16 @@ class AudioRecordingService : Service() {
     private var isRecording = false
     private var isPaused = false
     private var outputPath: String? = null
+    private var chunkDurationMs: Long? = null
+    private var chunkIndex: Int = 0
+    private var basePathWithoutExt: String? = null
+    private var fileExtension: String = ".m4a"
     private var wakeLock: PowerManager.WakeLock? = null
     private val binder = AudioRecordingBinder()
     private var heartbeatHandler: Handler? = null
     private var heartbeatRunnable: Runnable? = null
+    private var rotateHandler: Handler? = null
+    private var rotateRunnable: Runnable? = null
 
     inner class AudioRecordingBinder : Binder() {
         fun getService(): AudioRecordingService = this@AudioRecordingService
@@ -78,9 +89,10 @@ class AudioRecordingService : Service() {
         
         when (intent?.action) {
             ACTION_START_RECORDING -> {
-                val path = intent.getStringExtra("output_path")
+                val path = intent.getStringExtra(EXTRA_OUTPUT_PATH)
                 if (path != null) {
-                    startRecording(path)
+                    val maybeChunkMs: Long? = if (intent.hasExtra(EXTRA_CHUNK_DURATION_MS)) intent.getLongExtra(EXTRA_CHUNK_DURATION_MS, 0L) else null
+                    startRecording(path, maybeChunkMs?.takeIf { it > 0L })
                 }
             }
             ACTION_STOP_RECORDING -> stopRecording()
@@ -185,20 +197,22 @@ class AudioRecordingService : Service() {
         Log.d(TAG, "Heartbeat stopped")
     }
 
-    private fun startRecording(path: String) {
+    private fun startRecording(path: String, requestedChunkDurationMs: Long? = null) {
         try {
             if (isRecording) {
                 Log.w(TAG, "Already recording")
                 return
             }
 
-            outputPath = path
+            // Setup chunking configuration
+            setupChunking(path, requestedChunkDurationMs)
 
             // Ensure directory exists
-            val file = File(path)
+            val currentFilePath = currentChunkFilePath()
+            val file = File(currentFilePath)
             file.parentFile?.mkdirs()
 
-            Log.d(TAG, "Starting MediaRecorder for path: $path")
+            Log.d(TAG, "Starting MediaRecorder for path: $currentFilePath (chunkDurationMs=$chunkDurationMs)")
 
             mediaRecorder = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
                 MediaRecorder(this)
@@ -212,7 +226,7 @@ class AudioRecordingService : Service() {
                     setAudioEncoder(MediaRecorder.AudioEncoder.AAC)
                     setAudioEncodingBitRate(128000)
                     setAudioSamplingRate(44100)
-                    setOutputFile(path)
+                    setOutputFile(currentFilePath)
 
                     Log.d(TAG, "MediaRecorder configured, preparing...")
                     prepare()
@@ -228,9 +242,13 @@ class AudioRecordingService : Service() {
 
             isRecording = true
             isPaused = false
+            outputPath = currentFilePath
 
             startForeground(NOTIFICATION_ID, createNotification(true, false))
-            Log.d(TAG, "Recording started successfully: $path")
+            Log.d(TAG, "Recording started successfully: $currentFilePath")
+
+            // Start chunk rotation timer if enabled
+            startChunkRotationTimer()
 
         } catch (e: Exception) {
             Log.e(TAG, "Failed to start recording", e)
@@ -238,6 +256,108 @@ class AudioRecordingService : Service() {
             mediaRecorder = null
             stopSelf()
         }
+    }
+
+    private fun setupChunking(initialPath: String, requestedChunkDurationMs: Long?) {
+        // Derive base name and extension
+        val file = File(initialPath)
+        val name = file.name
+        val dotIndex = name.lastIndexOf('.')
+        if (dotIndex > 0) {
+            fileExtension = name.substring(dotIndex)
+            basePathWithoutExt = File(file.parent ?: "", name.substring(0, dotIndex)).path
+        } else {
+            fileExtension = ".m4a"
+            basePathWithoutExt = initialPath
+        }
+        chunkIndex = 1
+        chunkDurationMs = requestedChunkDurationMs?.takeIf { it > 0L }
+        Log.d(TAG, "Chunking configured: base=$basePathWithoutExt ext=$fileExtension chunkMs=$chunkDurationMs")
+    }
+
+    private fun currentChunkFilePath(): String {
+        val base = basePathWithoutExt ?: return outputPath ?: ""
+        return String.format("%s_%04d%s", base, chunkIndex, fileExtension)
+    }
+
+    private fun rotateToNextChunk() {
+        if (!isRecording || isPaused) {
+            // Will be rescheduled on resume if needed
+            return
+        }
+        try {
+            Log.d(TAG, "Rotating to next chunk from index=$chunkIndex")
+            // Stop current recorder
+            mediaRecorder?.apply {
+                stop()
+                release()
+            }
+            mediaRecorder = null
+
+            // Increment index and start new file
+            chunkIndex += 1
+            val nextPath = currentChunkFilePath()
+            val file = File(nextPath)
+            file.parentFile?.mkdirs()
+
+            mediaRecorder = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+                MediaRecorder(this)
+            } else {
+                @Suppress("DEPRECATION")
+                MediaRecorder()
+            }.apply {
+                try {
+                    setAudioSource(MediaRecorder.AudioSource.MIC)
+                    setOutputFormat(MediaRecorder.OutputFormat.MPEG_4)
+                    setAudioEncoder(MediaRecorder.AudioEncoder.AAC)
+                    setAudioEncodingBitRate(128000)
+                    setAudioSamplingRate(44100)
+                    setOutputFile(nextPath)
+
+                    prepare()
+                    start()
+                } catch (e: Exception) {
+                    Log.e(TAG, "Failed to start next chunk recorder", e)
+                    release()
+                    throw e
+                }
+            }
+
+            outputPath = nextPath
+            startForeground(NOTIFICATION_ID, createNotification(true, false))
+            Log.d(TAG, "Recording continued in new chunk: $nextPath")
+        } catch (e: Exception) {
+            Log.e(TAG, "Failed during chunk rotation", e)
+        }
+    }
+
+    private fun startChunkRotationTimer() {
+        // Clear any previous timer
+        rotateRunnable?.let { rotateHandler?.removeCallbacks(it) }
+        rotateHandler = Handler(Looper.getMainLooper())
+        val duration = chunkDurationMs
+        if (duration == null || duration <= 0L) {
+            Log.d(TAG, "Chunk rotation disabled")
+            return
+        }
+        rotateRunnable = object : Runnable {
+            override fun run() {
+                if (isRecording && !isPaused) {
+                    rotateToNextChunk()
+                }
+                // Schedule next rotation
+                rotateHandler?.postDelayed(this, duration)
+            }
+        }
+        rotateHandler?.postDelayed(rotateRunnable!!, duration)
+        Log.d(TAG, "Chunk rotation timer started: every ${duration}ms")
+    }
+
+    private fun stopChunkRotationTimer() {
+        rotateRunnable?.let { rotateHandler?.removeCallbacks(it) }
+        rotateRunnable = null
+        rotateHandler = null
+        Log.d(TAG, "Chunk rotation timer stopped")
     }
 
     private fun pauseRecording() {
@@ -253,6 +373,8 @@ class AudioRecordingService : Service() {
                 isPaused = true
                 startForeground(NOTIFICATION_ID, createNotification(true, true))
                 Log.d(TAG, "Recording paused successfully")
+                // Pause chunk rotation timer
+                stopChunkRotationTimer()
             } else {
                 Log.w(TAG, "Pause not supported on Android version ${Build.VERSION.SDK_INT}")
             }
@@ -274,6 +396,8 @@ class AudioRecordingService : Service() {
                 isPaused = false
                 startForeground(NOTIFICATION_ID, createNotification(true, false))
                 Log.d(TAG, "Recording resumed successfully")
+                // Resume chunk rotation timer from full interval
+                startChunkRotationTimer()
             } else {
                 Log.w(TAG, "Resume not supported on Android version ${Build.VERSION.SDK_INT}")
             }
@@ -285,6 +409,8 @@ class AudioRecordingService : Service() {
     private fun stopRecording() {
         try {
             Log.d(TAG, "Stopping recording (isRecording: $isRecording, isPaused: $isPaused)")
+            // Stop timers first
+            stopChunkRotationTimer()
             mediaRecorder?.apply {
                 if (isRecording) {
                     Log.d(TAG, "Stopping MediaRecorder...")

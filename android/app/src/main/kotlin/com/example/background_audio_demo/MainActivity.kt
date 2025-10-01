@@ -37,8 +37,9 @@ class MainActivity : FlutterActivity() {
             when (call.method) {
                 "startRecording" -> {
                     val outputPath = call.argument<String>("outputPath")
+                    val chunkDurationMs = call.argument<Int>("chunkDurationMs")?.toLong()
                     if (outputPath != null) {
-                        AudioRecordingService.startRecording(this, outputPath)
+                        AudioRecordingService.startRecording(this, outputPath, chunkDurationMs)
                         result.success(true)
                     } else {
                         result.error("INVALID_ARGUMENT", "Output path is required", null)

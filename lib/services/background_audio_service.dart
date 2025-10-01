@@ -14,12 +14,16 @@ class BackgroundAudioService {
   /// 
   /// On Android: Uses foreground service for persistent recording
   /// On iOS: Relies on background audio capability
-  Future<bool> startRecording(String outputPath) async {
+  Future<bool> startRecording(String outputPath, {int? chunkDurationMs}) async {
     try {
       if (Platform.isAndroid) {
-        final result = await _channel.invokeMethod('startRecording', {
+        final args = <String, dynamic>{
           'outputPath': outputPath,
-        });
+        };
+        if (chunkDurationMs != null && chunkDurationMs > 0) {
+          args['chunkDurationMs'] = chunkDurationMs;
+        }
+        final result = await _channel.invokeMethod('startRecording', args);
         return result == true;
       } else {
         // For iOS, we'll use the existing record package directly
